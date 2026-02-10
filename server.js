@@ -24,8 +24,11 @@ db.exec(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    plan TEXT DEFAULT 'free'
   );
+`);
+
 
   CREATE TABLE IF NOT EXISTS usage (
     user_id INTEGER NOT NULL,
