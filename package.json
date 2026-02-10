@@ -1,15 +1,17 @@
 {
-  "name": "hvac-ai",
+  "name": "hvac-ai-backend",
   "version": "1.0.0",
   "type": "module",
-  "scripts": { "start": "node server.js" },
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "better-sqlite3": "^9.4.3",
     "cookie-parser": "^1.4.6",
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
-    "openai": "^4.0.0"
+    "openai": "^4.0.0",
     "stripe": "^14.0.0"
   }
 }
