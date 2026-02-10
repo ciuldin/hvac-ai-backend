@@ -10,5 +10,6 @@
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
     "openai": "^4.0.0"
+    "stripe": "^14.0.0"
   }
 }
