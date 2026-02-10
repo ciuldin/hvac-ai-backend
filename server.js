@@ -9,14 +9,15 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 app.use(cookieParser());
 
-// ====== CONFIG ======
+// ===== CONFIG =====
 const JWT_SECRET = process.env.JWT_SECRET || "dev_secret_change_me";
 const COOKIE_NAME = "hvac_session";
+const DAILY_LIMIT = Number(process.env.DAILY_LIMIT || 5);
 
 // OpenAI
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// DB (SQLite)
+// DB
 const db = new Database("db.sqlite");
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -24,6 +25,13 @@ db.exec(`
     email TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
     created_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS usage (
+    user_id INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    PRIMARY KEY (user_id, date)
   );
 `);
 
@@ -34,10 +42,9 @@ function setSession(res, user) {
     { expiresIn: "7d" }
   );
 
-  // Cookie httpOnly: o JS do navegador não lê o token
   res.cookie(COOKIE_NAME, token, {
     httpOnly: true,
-    secure: true,     // Render é https
+    secure: true,
     sameSite: "lax",
     maxAge: 7 * 24 * 60 * 60 * 1000
   });
@@ -47,8 +54,7 @@ function getUserFromReq(req) {
   const token = req.cookies?.[COOKIE_NAME];
   if (!token) return null;
   try {
-    const payload = jwt.verify(token, JWT_SECRET);
-    return payload; // { sub, email }
+    return jwt.verify(token, JWT_SECRET);
   } catch {
     return null;
   }
@@ -61,24 +67,57 @@ function requireAuth(req, res, next) {
   next();
 }
 
-// ====== AUTH API ======
+function todayISO() {
+  return new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+}
+
+function checkAndIncrementUsage(userId) {
+  const date = todayISO();
+
+  const row = db.prepare(
+    "SELECT count FROM usage WHERE user_id = ? AND date = ?"
+  ).get(userId, date);
+
+  if (!row) {
+    db.prepare(
+      "INSERT INTO usage (user_id, date, count) VALUES (?, ?, ?)"
+    ).run(userId, date, 1);
+
+    return { allowed: true, remaining: Math.max(DAILY_LIMIT - 1, 0) };
+  }
+
+  if (row.count >= DAILY_LIMIT) {
+    return { allowed: false, remaining: 0 };
+  }
+
+  db.prepare(
+    "UPDATE usage SET count = count + 1 WHERE user_id = ? AND date = ?"
+  ).run(userId, date);
+
+  const newCount = row.count + 1;
+  return { allowed: true, remaining: Math.max(DAILY_LIMIT - newCount, 0) };
+}
+
+// ===== AUTH =====
 app.post("/api/auth/signup", async (req, res) => {
   try {
     const { email, password } = req.body || {};
     if (!email || !password) return res.status(400).json({ error: "Informe email e senha." });
     if (password.length < 6) return res.status(400).json({ error: "Senha deve ter no mínimo 6 caracteres." });
 
+    const cleanEmail = email.toLowerCase().trim();
     const password_hash = await bcrypt.hash(password, 10);
-    const stmt = db.prepare("INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)");
-    const info = stmt.run(email.toLowerCase().trim(), password_hash, new Date().toISOString());
 
-    const user = { id: info.lastInsertRowid, email: email.toLowerCase().trim() };
+    const info = db.prepare(
+      "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)"
+    ).run(cleanEmail, password_hash, new Date().toISOString());
+
+    const user = { id: info.lastInsertRowid, email: cleanEmail };
     setSession(res, user);
+
     res.json({ ok: true, user: { id: user.id, email: user.email } });
   } catch (e) {
-    if (String(e).includes("UNIQUE")) {
-      return res.status(409).json({ error: "Este email já está cadastrado." });
-    }
+    if (String(e).includes("UNIQUE")) return res.status(409).json({ error: "Este email já está cadastrado." });
     console.error(e);
     res.status(500).json({ error: "Erro ao criar conta." });
   }
@@ -89,8 +128,10 @@ app.post("/api/auth/login", async (req, res) => {
     const { email, password } = req.body || {};
     if (!email || !password) return res.status(400).json({ error: "Informe email e senha." });
 
-    const row = db.prepare("SELECT id, email, password_hash FROM users WHERE email = ?")
-      .get(email.toLowerCase().trim());
+    const cleanEmail = email.toLowerCase().trim();
+    const row = db.prepare(
+      "SELECT id, email, password_hash FROM users WHERE email = ?"
+    ).get(cleanEmail);
 
     if (!row) return res.status(401).json({ error: "Email ou senha inválidos." });
 
@@ -112,11 +153,11 @@ app.post("/api/auth/logout", (req, res) => {
 
 app.get("/api/auth/me", (req, res) => {
   const user = getUserFromReq(req);
-  if (!user) return res.status(200).json({ user: null });
+  if (!user) return res.json({ user: null });
   res.json({ user: { email: user.email } });
 });
 
-// ====== SITE ======
+// ===== SITE =====
 app.get("/", (_req, res) => {
   res.setHeader("Content-Type", "text/html; charset=utf-8");
   res.send(`
@@ -140,12 +181,12 @@ app.get("/", (_req, res) => {
 </head>
 <body>
   <h1>HVAC AI PRO</h1>
-  <p class="hint">Agora com login (chat protegido)</p>
+  <p class="hint">Login + limite grátis diário (${DAILY_LIMIT}/dia)</p>
 
-  <div class="card" id="authCard">
+  <div class="card">
     <div id="me"></div>
 
-    <div class="row">
+    <div class="row" style="margin-top:10px;">
       <div>
         <label>Email</label>
         <input id="email" placeholder="seuemail@exemplo.com"/>
@@ -203,7 +244,7 @@ app.get("/", (_req, res) => {
       });
       const data = await r.json();
       if(!r.ok) throw new Error(data.error || "Erro");
-      authStatus.textContent = "Conta criada e login feito ✅";
+      authStatus.textContent = "Conta criada ✅";
       await refreshMe();
     }catch(e){ authStatus.textContent = e.message; }
   };
@@ -234,6 +275,7 @@ app.get("/", (_req, res) => {
     if(!text) return;
     statusEl.textContent = "Consultando IA...";
     $("out").textContent = "";
+
     try{
       const r = await fetch("/api/chat", {
         method:"POST",
@@ -241,8 +283,11 @@ app.get("/", (_req, res) => {
         body: JSON.stringify({ message: text })
       });
       const data = await r.json();
+
       if(!r.ok) throw new Error(data.error || "Erro");
-      $("out").textContent = data.text || "";
+
+      $("out").textContent = data.text + "\\n\\nPerguntas restantes hoje: " + data.remaining;
+
     }catch(e){
       $("out").textContent = "Erro: " + e.message;
     }finally{
@@ -257,15 +302,23 @@ app.get("/", (_req, res) => {
   `);
 });
 
-// ====== CHAT (PROTEGIDO) ======
+// ===== CHAT (PROTEGIDO + LIMITE) =====
 const HVAC_PROMPT = `
 Você é uma IA especialista em HVAC/refrigeração (técnico sênior).
-Faça perguntas essenciais antes de concluir diagnóstico (modelo, gás, pressões, temperaturas, ambiente, sintomas).
+Sempre faça perguntas essenciais antes de concluir diagnóstico (modelo, gás, pressões, temperaturas, ambiente, sintomas).
 Não invente medições. Priorize segurança.
 `;
 
 app.post("/api/chat", requireAuth, async (req, res) => {
   try {
+    const usage = checkAndIncrementUsage(req.user.sub);
+
+    if (!usage.allowed) {
+      return res.status(403).json({
+        error: "Limite grátis diário atingido. Volte amanhã ou assine o plano profissional."
+      });
+    }
+
     const { message } = req.body || {};
     if (!message || typeof message !== "string") {
       return res.status(400).json({ error: "Envie { message: string }" });
@@ -278,7 +331,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       temperature: 0.3
     });
 
-    res.json({ text: response.output_text || "" });
+    res.json({ text: response.output_text || "", remaining: usage.remaining });
   } catch (err) {
     console.error("OPENAI ERROR:", err?.status, err?.message);
     res.status(500).json({ error: `${err?.status || ""} ${err?.message || "Falha ao chamar IA"}` });
@@ -287,4 +340,3 @@ app.post("/api/chat", requireAuth, async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Rodando na porta", PORT));
-
