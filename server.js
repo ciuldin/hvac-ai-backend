@@ -457,3 +457,165 @@ app.get("/", (_req, res) => {
 /* ================= START ================= */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log("Rodando na porta", PORT));
+// =================== P-T TABLES (pontos + interpolação) ===================
+// Unidades internas: pressão em kPa, temperatura em °C
+// Tabela enxuta (pontos). Dá para aumentar depois.
+
+const PT_TABLES = {
+  // R410A (aprox) - pontos comuns para HVAC
+  R410A: [
+    { p_kpa: 300, t_c: -12.0 },
+    { p_kpa: 400, t_c: -5.0 },
+    { p_kpa: 500, t_c: 0.0 },
+    { p_kpa: 600, t_c: 4.0 },
+    { p_kpa: 700, t_c: 8.0 },
+    { p_kpa: 800, t_c: 11.5 },
+    { p_kpa: 900, t_c: 15.0 },
+    { p_kpa: 1000, t_c: 18.0 },
+    { p_kpa: 1200, t_c: 24.0 },
+    { p_kpa: 1400, t_c: 29.0 },
+    { p_kpa: 1600, t_c: 33.5 },
+    { p_kpa: 1800, t_c: 37.5 },
+    { p_kpa: 2000, t_c: 41.0 },
+    { p_kpa: 2400, t_c: 48.0 },
+    { p_kpa: 2800, t_c: 54.0 }
+  ],
+
+  // R134a (aprox)
+  R134a: [
+    { p_kpa: 100, t_c: -26.0 },
+    { p_kpa: 150, t_c: -18.0 },
+    { p_kpa: 200, t_c: -12.0 },
+    { p_kpa: 300, t_c: -2.0 },
+    { p_kpa: 400, t_c: 6.0 },
+    { p_kpa: 500, t_c: 12.5 },
+    { p_kpa: 600, t_c: 18.0 },
+    { p_kpa: 700, t_c: 22.5 },
+    { p_kpa: 800, t_c: 26.5 },
+    { p_kpa: 900, t_c: 30.0 },
+    { p_kpa: 1000, t_c: 33.0 },
+    { p_kpa: 1200, t_c: 38.0 },
+    { p_kpa: 1400, t_c: 42.0 }
+  ],
+
+  // R22 (aprox)
+  R22: [
+    { p_kpa: 200, t_c: -25.0 },
+    { p_kpa: 300, t_c: -16.0 },
+    { p_kpa: 400, t_c: -9.0 },
+    { p_kpa: 500, t_c: -3.0 },
+    { p_kpa: 600, t_c: 2.0 },
+    { p_kpa: 700, t_c: 6.5 },
+    { p_kpa: 800, t_c: 10.5 },
+    { p_kpa: 900, t_c: 14.0 },
+    { p_kpa: 1000, t_c: 17.0 },
+    { p_kpa: 1200, t_c: 22.0 },
+    { p_kpa: 1400, t_c: 26.0 },
+    { p_kpa: 1600, t_c: 30.0 },
+    { p_kpa: 1800, t_c: 33.5 },
+    { p_kpa: 2000, t_c: 36.5 }
+  ]
+};
+
+function toKpa(value, unit) {
+  const v = Number(value);
+  if (!Number.isFinite(v)) return null;
+  const u = (unit || "kpa").toLowerCase();
+
+  // pressão absoluta vs manométrica: aqui assumimos MANOMÉTRICA típica de campo.
+  // Se você medir em bar(g) ou psi(g), converter direto.
+
+  if (u === "kpa") return v;
+  if (u === "bar") return v * 100; // 1 bar = 100 kPa (aprox)
+  if (u === "psi") return v * 6.89476; // 1 psi = 6.89476 kPa
+  return null;
+}
+
+function interpSatTemp(table, p_kpa) {
+  if (!table?.length) return null;
+  const t = table.slice().sort((a, b) => a.p_kpa - b.p_kpa);
+
+  if (p_kpa <= t[0].p_kpa) return t[0].t_c;
+  if (p_kpa >= t[t.length - 1].p_kpa) return t[t.length - 1].t_c;
+
+  for (let i = 0; i < t.length - 1; i++) {
+    const a = t[i], b = t[i + 1];
+    if (p_kpa >= a.p_kpa && p_kpa <= b.p_kpa) {
+      const frac = (p_kpa - a.p_kpa) / (b.p_kpa - a.p_kpa);
+      return a.t_c + frac * (b.t_c - a.t_c);
+    }
+  }
+  return null;
+}
+
+function formatTable(gas) {
+  const key = String(gas || "").toUpperCase();
+  const table = PT_TABLES[key];
+  if (!table) return null;
+  const lines = [
+    `Tabela P-T (aprox) para ${key} — pressão (kPa) x temp saturação (°C)`,
+    `Obs: valores aproximados (tabela enxuta + interpolação).`
+  ];
+  for (const row of table) {
+    lines.push(`${row.p_kpa.toString().padStart(4, " ")} kPa  →  ${row.t_c.toFixed(1)} °C`);
+  }
+  return lines.join("\n");
+}
+
+// Tenta interpretar comandos do usuário:
+// - "tabela R410A"
+// - dados para SH/SC
+function tryToolsFromText(text) {
+  const s = String(text || "").trim();
+
+  // Comando de tabela: "tabela R410A"
+  const mTab = s.match(/^tabela\s+(r\d+[a-z0-9]*)$/i);
+  if (mTab) {
+    const out = formatTable(mTab[1]);
+    if (!out) return { type: "tool", text: `Não tenho tabela para ${mTab[1].toUpperCase()} ainda.` };
+    return { type: "tool", text: out };
+  }
+
+  // Parse simples para cálculo:
+  // Exemplo: "R410A sucção 120 psi temp sucção 18C descarga 380 psi temp líquido 33C"
+  const gasMatch = s.match(/\b(r\d+[a-z0-9]*)\b/i);
+  const gas = gasMatch ? gasMatch[1].toUpperCase() : null;
+
+  // captura pressão sucção/descarga
+  const suc = s.match(/suc(?:cao|ção)?\s*[:=]?\s*(\d+(?:[.,]\d+)?)\s*(kpa|bar|psi)\b/i);
+  const dis = s.match(/desc(?:arga)?\s*[:=]?\s*(\d+(?:[.,]\d+)?)\s*(kpa|bar|psi)\b/i);
+
+  // captura temperatura linha sucção e linha líquido
+  const ts = s.match(/temp(?:eratura)?\s*(?:linha\s*)?(?:suc(?:cao|ção)|suc)\s*[:=]?\s*(\d+(?:[.,]\d+)?)\s*(c|°c)\b/i);
+  const tl = s.match(/temp(?:eratura)?\s*(?:linha\s*)?(?:liq(?:uido|uído)|liquido|líquido)\s*[:=]?\s*(\d+(?:[.,]\d+)?)\s*(c|°c)\b/i);
+
+  const hasAny = gas && (suc || dis || ts || tl);
+  if (!hasAny) return null;
+
+  const table = gas ? PT_TABLES[gas] : null;
+  if (!table) {
+    return { type: "calc", error: `Não tenho tabela P-T para ${gas || "esse gás"}. Tente: tabela R410A, tabela R22, tabela R134a.` };
+  }
+
+  const pSuc = suc ? toKpa(String(suc[1]).replace(",", "."), suc[2]) : null;
+  const pDis = dis ? toKpa(String(dis[1]).replace(",", "."), dis[2]) : null;
+  const tSucLine = ts ? Number(String(ts[1]).replace(",", ".")) : null;
+  const tLiqLine = tl ? Number(String(tl[1]).replace(",", ".")) : null;
+
+  // Calcular quando possível
+  let tSatEv = null, tSatCond = null, superheat = null, subcool = null;
+
+  if (pSuc != null) tSatEv = interpSatTemp(table, pSuc);
+  if (pDis != null) tSatCond = interpSatTemp(table, pDis);
+
+  if (tSatEv != null && tSucLine != null) superheat = tSucLine - tSatEv;
+  if (tSatCond != null && tLiqLine != null) subcool = tSatCond - tLiqLine;
+
+  return {
+    type: "calc",
+    gas,
+    inputs: { pSuc_kpa: pSuc, pDis_kpa: pDis, tSucLine_c: tSucLine, tLiqLine_c: tLiqLine },
+    outputs: { tSatEv_c: tSatEv, tSatCond_c: tSatCond, superheat_c: superheat, subcool_c: subcool }
+  };
+}
+
